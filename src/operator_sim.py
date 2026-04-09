@@ -156,14 +156,19 @@ def run_simulation(events: List[Dict], n_runs: int = N_SIMULATION_RUNS) -> List[
                     
                     # Calculate Cost
                     c = 0
-                    if res["true_risk"] == "critical" and res["action_taken"] != "execute_maneuver":
+                    true_risk = res["true_risk"]
+                    action = res["action_taken"]
+                    if true_risk == "critical" and action != "execute_maneuver":
                         c = COST_WEIGHTS["missed_critical"]
                         shift_miss += 1
-                    elif res["true_risk"] == "high" and res["action_taken"] not in ["execute_maneuver", "prepare_maneuver"]:
+                    elif true_risk == "high" and action not in ["execute_maneuver", "prepare_maneuver"]:
                         c = COST_WEIGHTS["missed_high"]
                         shift_miss += 1
-                    elif res["action_taken"] == "execute_maneuver" and res["true_risk"] not in ["critical", "high"]:
+                    elif action == "execute_maneuver" and true_risk not in ["critical", "high"]:
                         c = COST_WEIGHTS["false_maneuver"]
+                        shift_fa += 1
+                    elif action == "prepare_maneuver" and true_risk in ["medium", "low"]:
+                        c = COST_WEIGHTS["false_prepare"]
                         shift_fa += 1
                     
                     shift_cost += c

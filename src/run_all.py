@@ -39,25 +39,46 @@ def run_pipeline():
     for k, v in sorted(metrics["feature_importances"].items(), key=lambda x: -x[1]):
         print(f"    - {k}: {v:.3f}")
         
-    # 3. Filter & Predict (Optimization)
-    print("\nStep 3: Filtering & Generating AI predictions...")
-    
-    # Keep all critical/high risk, plus top medium/low by probability
-    # Sorting by max_probability descending
-    events.sort(key=lambda x: x["max_probability"], reverse=True)
-    
-    # Take top 2000 events for the UI/Simulation to keep things fast
-    # (114k is too many for the browser/sim loop)
-    events_subset = events[:2000]
-    print(f"  Subset selected: {len(events_subset)} events (top risk)")
-    
+    # 3. Filter & Predict
+    print("\nStep 3: Building balanced simulation dataset...")
+
+    # SOCRATES only reports close approaches, so medium/low are rare in real data.
+    # We supplement with synthetic events so the simulation tests all decision types
+    # (false alarms on low-risk events are as important as misses on critical ones).
+    import random as _random
+    from src.conjunction_data import parse_socrates_csv, enrich_conjunctions, _generate_synthetic_csv
+
+    _random.seed(42)
+    by_risk = {"critical": [], "high": [], "medium": [], "low": []}
+    for e in events:
+        by_risk[e["risk_level"]].append(e)
+
+    # Supplement medium/low from synthetic data
+    if len(by_risk["medium"]) < 300 or len(by_risk["low"]) < 300:
+        print("  Supplementing medium/low with synthetic events...")
+        syn_csv = _generate_synthetic_csv(n=2000)
+        syn_records = parse_socrates_csv(syn_csv)
+        syn_events = enrich_conjunctions(syn_records)
+        for e in syn_events:
+            by_risk[e["risk_level"]].append(e)
+
+    events_subset = []
+    for level, bucket in by_risk.items():
+        sample = _random.sample(bucket, min(300, len(bucket)))
+        events_subset.extend(sample)
+        print(f"  {level}: {len(sample)} events (pool: {len(bucket)})")
+
+    # Re-index event IDs to avoid duplicates
+    for i, e in enumerate(events_subset):
+        e["event_id"] = f"CNJ-{i+1:04d}"
+
+    print(f"  Total: {len(events_subset)} events (balanced across risk levels)")
     events_with_ai = predict_risk(events_subset)
-    
-    # 4. Run Simulation
-    # Sample 500 from the subset
-    sim_events = events_with_ai[:500]
+
+    # 4. Run Simulation — use full balanced subset
+    sim_events = events_with_ai
             
-    print(f"\nStep 4: Running Monte Carlo Simulation ({N_SIMULATION_RUNS} runs on {len(sim_events)} sampled events)...")
+    print(f"\nStep 4: Running Monte Carlo Simulation ({N_SIMULATION_RUNS} runs × {len(sim_events)} events)...")
     sim_start = time.time()
     results = run_simulation(sim_events, n_runs=N_SIMULATION_RUNS)
     print(f"  Simulation completed in {time.time() - sim_start:.1f}s")
