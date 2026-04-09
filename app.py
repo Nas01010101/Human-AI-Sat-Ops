@@ -93,3 +93,32 @@ not from human annotation.
 """)
 
 st.caption("Data provided by CelesTrak. This is a research prototype — not for operational use.")
+
+st.divider()
+
+# ── Live Space News (Brave Search) ───────────────────────────────
+st.subheader("Live Space News")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from src.brave_search import get_space_news, _get_api_key
+
+if _get_api_key():
+    with st.spinner("Fetching latest news..."):
+        news = get_space_news()
+    if news:
+        for item in news:
+            st.markdown(f"**[{item['title']}]({item['url']})**")
+            if item["description"]:
+                st.caption(item["description"])
+    else:
+        st.info("No results returned from Brave Search.")
+else:
+    st.info(
+        "Add your `BRAVE_SEARCH_API_KEY` to `.env` to enable live space news. "
+        "Get a free key at [api.search.brave.com](https://api.search.brave.com/)."
+    )
