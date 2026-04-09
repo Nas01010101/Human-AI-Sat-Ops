@@ -26,81 +26,81 @@ from src.config import (
 class OperatorModel:
     """
     Simulates a human operator's cognitive process during a shift.
-    Based on Wickens' SEEV mode (Salience, Effort, Expectancy, Value)
-    and trusting automation literature (Parasuraman & Riley).
+
+    Improvements over baseline:
+    - Dynamic trust: trust_in_ai updates based on observed AI correctness
+    - Confidence-aware verification: low AI confidence triggers more scrutiny
+    - Evidence quality modulation: Variant B/C evidence_strength affects decision
+    - Fatigue compounds error rate per-event (not just a flat offset)
     """
 
     def __init__(self, profile_name: str, ui_variant: str):
         self.profile = OPERATOR_PROFILES[profile_name]
         self.ui = UI_EFFECTS[ui_variant]
         self.variant_code = ui_variant
-        
-        # State
-        self.fatigue_level = 0.0          # Increases over shift
-        self.current_attention = self.profile["attention_capacity"] + self.ui["attention_boost"]
+
+        self.fatigue_level = 0.0
         self.trust_in_ai = self.profile["automation_reliance"]
+        self._recent_ai_outcomes = []   # track last N AI decisions for trust update
 
     def process_event(self, event: Dict) -> Dict:
-        """
-        Operator decides on an action for a single collision event.
-        
-        Steps:
-          1. Notice event (Attention)
-          2. Check AI recommendation (Trust)
-          3. Verify data? (Effort vs. Value)
-          4. Decide action (Execution)
-        """
         ai_pred = event.get("ai_prediction", {})
         ai_risk = ai_pred.get("risk_level", "low")
-        ai_conf = ai_pred.get("confidence", 0.0)
+        ai_conf = ai_pred.get("confidence", 0.5)
+        evidence_strength = ai_pred.get("evidence_strength", "moderate")
         true_risk = event["risk_level"]
-        
-        # 1. Attention & Fatigue
-        # Fatigue increases error probability
-        effective_error_rate = self.profile["base_error_rate"] + self.fatigue_level
+
+        # 1. Fatigue accumulates per event
+        effective_error_rate = min(
+            self.profile["base_error_rate"] + self.fatigue_level, 0.6
+        )
         self.fatigue_level += self.profile.get("fatigue_growth", 0.0)
-        
-        # 2. Verification Decision
-        # Will the operator verify the AI's claim or just click "Accept"?
-        # Influenced by profile propensity + UI scaffolding
+
+        # 2. Verification probability
+        #    Base: profile propensity + UI boost
+        #    Increase if: AI confidence is low, evidence is weak
+        #    Decrease if: trust is high AND AI is confident (complacency)
         p_verify = self.profile["verification_propensity"] + self.ui["verification_boost"]
-        
-        # Lower verification if trust is high and AI is confident (complacency)
-        if self.trust_in_ai > 0.8 and ai_conf > 0.9:
-            p_verify *= 0.6
-            
+
+        # Low AI confidence → operator more likely to double-check
+        if ai_conf < 0.6:
+            p_verify = min(p_verify + 0.25, 1.0)
+        elif ai_conf > 0.9 and self.trust_in_ai > 0.75:
+            p_verify *= 0.55   # complacency effect
+
+        # Variant B/C: weak evidence explicitly shown → triggers verification
+        if self.variant_code in ["B", "C"] and evidence_strength == "weak":
+            p_verify = min(p_verify + 0.20, 1.0)
+
         is_verified = RNG.random() < p_verify
-        
-        # 3. Decision Logic
+
+        # 3. Decision
         if is_verified:
-            # Operator looks at evidence (min_range, prob, stale data)
-            # Simulates "finding the truth" but with some residual error chance
-            if RNG.random() > effective_error_rate:
-                # Correctly identifies the true risk based on physics rules
-                perceived_risk = true_risk 
-            else:
-                 # Verification failed (human error) -> defaults to AI or random
-                 perceived_risk = ai_risk
+            perceived_risk = true_risk if RNG.random() > effective_error_rate else ai_risk
         else:
-            # No verification -> Rely on AI prediction (Automation Bias)
             perceived_risk = ai_risk
-            
-        # 4. Action Execution
-        # Map perceived risk to action
+
+        # 4. Checklist interlock (Variant C)
         from src.config import ACTION_RULES
         chosen_action = ACTION_RULES.get(perceived_risk, "log_only")
-        
-        # UI friction/interlock (e.g., Variant C checklist for critical)
+
         time_taken = self.profile["decision_time_mean"]
         if is_verified:
             time_taken += self.ui["time_cost_evidence"]
-            
         if self.ui["checklist_required"] and perceived_risk in ["critical", "high"]:
-            # Checklists reduce error but take time
-            if RNG.random() < self.profile["checklist_adherence"]:
-                # Checklist caught an error? (if any)
-                pass 
             time_taken += self.ui["time_cost_checklist"]
+
+        # 5. Dynamic trust update
+        #    Operator can only observe AI correctness on events they verified
+        if is_verified:
+            ai_was_correct = (ai_risk == true_risk)
+            self._recent_ai_outcomes.append(ai_was_correct)
+            if len(self._recent_ai_outcomes) > 10:
+                self._recent_ai_outcomes.pop(0)
+            # Bayesian-style trust update: drift toward observed accuracy
+            observed_acc = sum(self._recent_ai_outcomes) / len(self._recent_ai_outcomes)
+            self.trust_in_ai += 0.05 * (observed_acc - self.trust_in_ai)
+            self.trust_in_ai = float(np.clip(self.trust_in_ai, 0.1, 0.99))
 
         return {
             "event_id": event["event_id"],
@@ -110,7 +110,8 @@ class OperatorModel:
             "action_taken": chosen_action,
             "action_correct": chosen_action == event["action_true"],
             "verification_performed": is_verified,
-            "time_taken": time_taken
+            "time_taken": time_taken,
+            "trust_at_decision": round(self.trust_in_ai, 3),
         }
 
 

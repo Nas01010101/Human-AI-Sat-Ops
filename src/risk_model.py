@@ -77,7 +77,11 @@ def train_risk_model(events: List[Dict]) -> Dict:
 def predict_risk(events: List[Dict]) -> List[Dict]:
     """
     Generate AI predictions, confidence scores, and explanations for events.
-    Appends 'ai_prediction' dict to each event.
+
+    Confidence is calibrated to reflect genuine uncertainty near decision
+    boundaries (e.g. miss distance just above/below threshold), not just
+    raw RF vote fractions. This produces realistic AI behavior where the
+    model is confident on clear cases and uncertain on edge cases.
     """
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model not found at {MODEL_PATH}. Train first.")
@@ -85,37 +89,57 @@ def predict_risk(events: List[Dict]) -> List[Dict]:
     rf = joblib.load(MODEL_PATH)
     df = flatten_features(events)
     X = df[FEATURE_NAMES]
-    
-    # Probabilities for all classes
+
     probs = rf.predict_proba(X)
     classes = rf.classes_
-    
-    # Feature contributions (simplified SHAP-like approach using tree paths would be better,
-    # but for speed we'll use global importance * local feature value deviation)
     importances = rf.feature_importances_
     means = X.mean()
-    stds = X.std().replace(0, 1)  # avoid div/0
+    stds = X.std().replace(0, 1)
+
+    # Boundary proximity: how close is each event to a risk threshold?
+    # Closer to boundary → lower confidence, higher chance of wrong prediction
+    RANGE_BOUNDARIES = [1.0, 5.0, 25.0]   # critical/high/medium thresholds
+    PROB_BOUNDARIES  = [1e-4, 1e-5]
 
     results = []
     for i, event in enumerate(events):
-        # Top prediction
         top_idx = np.argmax(probs[i])
         pred_label = classes[top_idx]
-        confidence = float(np.max(probs[i]))
-        
-        # Generate Explanation
-        explanation = _generate_explanation(
-            event, pred_label, confidence, X.iloc[i], means, stds, importances
+        raw_conf = float(np.max(probs[i]))
+
+        # Compute boundary proximity penalty
+        r = event["features"]["min_range_km"]
+        p = event["features"]["max_probability"]
+
+        range_penalty = min(
+            abs(r - b) / (b + 1e-9) for b in RANGE_BOUNDARIES
         )
-        
+        prob_penalty = min(
+            abs(np.log10(max(p, 1e-12)) - np.log10(b)) for b in PROB_BOUNDARIES
+        )
+
+        # Normalize penalties: close to boundary (penalty < 0.2) → reduce confidence
+        boundary_factor = min(range_penalty, 1.0) * min(prob_penalty / 2.0, 1.0)
+        calibrated_conf = raw_conf * (0.6 + 0.4 * min(boundary_factor, 1.0))
+        calibrated_conf = float(np.clip(calibrated_conf, 0.3, 0.99))
+
+        # Evidence strength from data staleness (used by operator model)
+        evidence_strength = event.get("evidence_strength", "moderate")
+
+        explanation = _generate_explanation(
+            event, pred_label, calibrated_conf, X.iloc[i], means, stds, importances
+        )
+
         event["ai_prediction"] = {
             "risk_level": pred_label,
-            "confidence": round(confidence, 3),
+            "confidence": round(calibrated_conf, 3),
+            "raw_confidence": round(raw_conf, 3),
+            "evidence_strength": evidence_strength,
             "explanation": explanation,
             "action_recommendation": _recommend_action(pred_label, event),
         }
         results.append(event)
-        
+
     return results
 
 
